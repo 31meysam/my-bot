@@ -31,5 +31,14 @@ async def gen_image(message: types.Message):
     )
     await bot.send_photo(message.chat.id, response['data'][0]['url'])
 
+import sqlite3
+
+conn = sqlite3.connect('chat.db')
+cursor = conn.cursor()
+
+# ذخیره پیام‌ها
+def save_message(user_id, text):
+    cursor.execute("INSERT INTO chats VALUES (?, ?)", (user_id, text))
+    conn.commit()
 if name == 'main':
     executor.start_polling(dp, skip_updates=True)
