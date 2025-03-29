@@ -1,9 +1,9 @@
-from aiogram import Bot, Dispatcher, types
-from aiogram.utils import executor
+from aiogram import Bot, Dispatcher, executor  # خط ۱
+from aiogram import types  # خط ۲
 import openai
 import os
 from dotenv import load_dotenv
-
+# بقیه کدها بدون تغییر...
 # تنظیمات اولیه
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_TOKEN")
