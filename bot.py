@@ -1,11 +1,10 @@
 import os
 import logging
-from typing import Optional
-from dotenv import load_dotenv
-from aiogram import Bot, Dispatcher, types, executor
-from aiogram.utils.exceptions import TelegramAPIError
-from openai import OpenAI, APIConnectionError, APIError
-
+# تغییر خط import به این شکل:
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+from aiogram.webhook.aiohttp_server import setup_application  # برای webhook
+from aiogram.client.default import DefaultBotProperties  # تنظیمات پیش‌فرض
 # --- تنظیمات اولیه ---
 load_dotenv()
 
