@@ -1,5 +1,4 @@
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import DefaultBotProperties
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 from config import BOT_TOKEN, DEEPSEEK_API_KEY
@@ -31,7 +30,8 @@ class RateLimitExceeded(AIException):
     pass
 
 # 3. تنظیمات پیشرفته ربات
-bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
+# تغییر در ایجاد ربات (حذف پارامتر parse_mode)
+bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
@@ -226,11 +226,6 @@ async def enable_chat_mode(message: types.Message):
     )
 
 # 9. مدیریت مرکزی پیام‌ها
-@dp.message()
-async def handle_all_messages(message: types.Message):
-    """سیستم یکپارچه پردازش پیام‌ها"""
-    user = message.from_user
-    # 9. مدیریت مرکزی پیام‌ها
 @dp.message()
 async def handle_all_messages(message: types.Message):
     """سیستم یکپارچه پردازش پیام‌ها"""
