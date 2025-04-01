@@ -1,141 +1,285 @@
-import asyncio
-import logging
-import json
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.utils.keyboard import ReplyKeyboardBuilder
+from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 from config import BOT_TOKEN, DEEPSEEK_API_KEY
 import aiohttp
+import logging
+import json
+import asyncio
+from typing import Optional, Dict, Any
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-# تنظیمات لاگ
+# 1. تنظیمات پیشرفته لاگ‌گیری
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('bot.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger(__name__)
 
-bot = Bot(token=BOT_TOKEN)
+# 2. کلاس مدیریت خطاهای سفارشی
+class AIException(Exception):
+    """خطاهای اختصاصی سیستم هوش مصنوعی"""
+    pass
+
+class RateLimitExceeded(AIException):
+    """خطای محدودیت نرخ"""
+    pass
+
+# 3. تنظیمات پیشرفته ربات
+bot = Bot(token=BOT_TOKEN, parse_mode='HTML')
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# ========== دکمه‌های پیشرفته ========== #
-def get_main_menu():
-    keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.add(
-        KeyboardButton("💬 چت با هوش مصنوعی"),
-        KeyboardButton("ℹ️ اطلاعات ربات"),
-        KeyboardButton("🔍 جستجو در ویکی‌پدیا"),
-        KeyboardButton("🆘 راهنما")
+# 4. سیستم کشینگ پیشرفته
+class ResponseCache:
+    """سیستم کش برای ذخیره پاسخ‌های متداول"""
+    _instance = None
+    _cache: Dict[str, str] = {}
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def get(self, prompt: str) -> Optional[str]:
+        return self._cache.get(prompt[:100])  # استفاده از 100 کاراکتر اول به عنوان کلید
+
+    def set(self, prompt: str, response: str):
+        self._cache[prompt[:100]] = response
+
+# 5. سرویس هوش مصنوعی با قابلیت بازآزمایی خودکار
+class AIService:
+    """سرویس پیشرفته ارتباط با DeepSeek AI"""
+    
+    def __init__(self):
+        self.base_url = "https://api.deepseek.com/v1"
+        self.headers = {
+            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+            "Content-Type": "application/json",
+            "X-Request-ID": "bot-request-123"  # برای رهگیری بهتر
+        }
+        self.cache = ResponseCache()
+        self.timeout = aiohttp.ClientTimeout(total=45, connect=10)
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError)),
+        reraise=True
     )
-    return keyboard
-
-def get_inline_keyboard():
-    buttons = [
-        [InlineKeyboardButton("پشتیبانی 📞", url="t.me/example_support")],
-        [InlineKeyboardButton("سورس کد 🔗", url="github.com/your_repo")],
-        [InlineKeyboardButton("آموزش استفاده 📚", callback_data="help")]
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-# ========== ارتباط با هوش مصنوعی (DeepSeek) ========== #
-async def get_ai_response(prompt: str) -> str:
-    API_URL = "https://api.deepseek.com/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "model": "deepseek-chat",
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.7,
-        "max_tokens": 1000
-    }
-
-    try:
+    async def _make_api_call(self, payload: dict) -> Dict[str, Any]:
+        """تماس پایه با API با قابلیت بازآزمایی"""
         async with aiohttp.ClientSession() as session:
-            async with session.post(API_URL, json=payload, headers=headers) as resp:
-                if resp.status != 200:
-                    error_text = await resp.text()
-                    logger.error(f"API Error: {resp.status} - {error_text}")
-                    return f"خطا در ارتباط با سرور (کد {resp.status})"
+            try:
+                async with session.post(
+                    url=f"{self.base_url}/chat/completions",
+                    json=payload,
+                    headers=self.headers,
+                    timeout=self.timeout
+                ) as response:
+                    
+                    if response.status == 429:
+                        raise RateLimitExceeded("محدودیت نرخ مصرف")
+                    
+                    if response.status != 200:
+                        error = await response.text()
+                        logger.error(f"API Error {response.status}: {error}")
+                        raise AIException(f"خطای سرور: {response.status}")
 
-                response = await resp.json()
-                if "choices" in response and len(response["choices"]) > 0:
-                    return response["choices"][0]["message"]["content"]
-                elif "error" in response:
-                    return f"خطا از سمت هوش مصنوعی: {response['error']}"
-                else:
-                    return "پاسخ دریافتی غیرمنتظره بود. لطفاً دوباره تلاش کنید."
-    except aiohttp.ClientError as e:
-        logger.error(f"Connection Error: {str(e)}")
-        return "خطا در اتصال به سرور هوش مصنوعی"
-    except Exception as e:
-        logger.error(f"Unexpected Error: {str(e)}")
-        return "خطای غیرمنتظره رخ داد"
+                    return await response.json()
 
-# ========== دستورات ربات ========== #
+            except json.JSONDecodeError as e:
+                logger.error(f"JSON Decode Error: {str(e)}")
+                raise AIException("خطای پردازش پاسخ سرور")
+
+    async def generate_response(self, prompt: str) -> dict:
+        """تولید پاسخ با مدیریت کامل خطاها"""
+        try:
+            # 1. بررسی کش
+            if cached := self.cache.get(prompt):
+                logger.info("Using cached response")
+                return {"choices": [{"message": {"content": cached}}]}
+
+            # 2. ساختار درخواست
+            payload = {
+                "model": "deepseek-chat",
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.7,
+                "max_tokens": 2500,
+                "top_p": 0.9,
+                "frequency_penalty": 0.2
+            }
+
+            # 3. ارسال درخواست
+            data = await self._make_api_call(payload)
+            
+            # 4. ذخیره در کش
+            if response := data.get("choices", [{}])[0].get("message", {}).get("content"):
+                self.cache.set(prompt, response)
+            
+            return data
+
+        except RateLimitExceeded:
+            return {"error": "⚠️ تعداد درخواست‌ها بیش از حد مجاز است. لطفاً 1 دقیقه صبر کنید."}
+        except asyncio.TimeoutError:
+            return {"error": "⏳ زمان انتظار به پایان رسید. لطفاً دوباره تلاش کنید."}
+        except AIException as e:
+            return {"error": f"⚠️ خطای سیستم: {str(e)}"}
+        except Exception as e:
+            logger.exception("Unexpected error in AI service")
+            return {"error": "⚠️ خطای غیرمنتظره در پردازش درخواست"}
+
+# 6. سیستم مدیریت حالت‌های کاربر
+class UserStateManager:
+    """مدیریت پیشرفته حالت‌های کاربر"""
+    
+    def __init__(self):
+        self.user_states = {}
+
+    def set_state(self, user_id: int, state: str):
+        self.user_states[user_id] = state
+
+    def get_state(self, user_id: int) -> str:
+        return self.user_states.get(user_id, "default")
+
+state_manager = UserStateManager()
+
+# 7. ساختارهای رابط کاربری پیشرفته
+def build_main_menu() -> types.ReplyKeyboardMarkup:
+    """منوی اصلی با طراحی واکنش‌گرا"""
+    builder = ReplyKeyboardBuilder()
+    buttons = [
+        ("💬 چت هوشمند", "start_chat"),
+        ("ℹ️ اطلاعات ربات", "bot_info"),
+        ("⚙️ تنظیمات", "settings"),
+        ("📊 آمار", "stats"),
+        ("🛠️ ابزارها", "tools"),
+        ("📚 راهنما", "help")
+    ]
+    
+    for text, callback in buttons:
+        builder.add(types.KeyboardButton(text=text))
+    
+    builder.adjust(2, 2, 2)
+    return builder.as_markup(
+        resize_keyboard=True,
+        input_field_placeholder="گزینه مورد نظر را انتخاب کنید..."
+    )
+
+def build_ai_settings_menu() -> types.InlineKeyboardMarkup:
+    """منوی تنظیمات پیشرفته هوش مصنوعی"""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        types.InlineKeyboardButton(text="🔧 تغییر مدل", callback_data="change_model"),
+        types.InlineKeyboardButton(text="⚖️ تنظیم دقت", callback_data="set_temp")
+    )
+    builder.row(
+        types.InlineKeyboardButton(text="📏 طول پاسخ", callback_data="set_max_tokens"),
+        types.InlineKeyboardButton(text="🔙 بازگشت", callback_data="main_menu")
+    )
+    return builder.as_markup()
+
+# 8. هندلرهای هوشمند
 @dp.message(commands=['start', 'help'])
-async def cmd_start(message: types.Message):
-    welcome_text = (
-        "👋 **به ربات هوش مصنوعی خوش آمدید!**\n\n"
-        "🔹 برای شروع چت، پیام خود را ارسال کنید یا از دکمه‌های زیر استفاده نمایید:\n"
-        "• /start - نمایش این پیام\n"
-        "• /help - راهنمای استفاده"
-    )
-    await message.answer(welcome_text, reply_markup=get_main_menu())
+async def handle_start(message: types.Message):
+    """مدیریت دستور شروع با تجربه کاربری غنی"""
+    user = message.from_user
+    welcome_msg = f"""
+    🌟 <b>سلام {user.first_name}!</b> 🌟
 
-@dp.message(lambda msg: msg.text == "💬 چت با هوش مصنوعی")
-async def ai_chat_mode(message: types.Message):
+🤖 به پیشرفته‌ترین ربات هوش مصنوعی خوش آمدید!
+
+🔹 <u>امکانات اصلی:</u>
+• چت هوشمند با DeepSeek AI
+• تنظیمات پیشرفته مدل
+• پشتیبانی 24/7
+• سیستم گزارش خودکار
+
+📌 لطفاً از منوی زیر انتخاب کنید:
+    """
+    
     await message.answer(
-        "💡 **حالت چت فعال شد!**\n"
-        "سوالات خود را بپرسید.",
-        reply_markup=types.ReplyKeyboardRemove()
+        text=welcome_msg,
+        reply_markup=build_main_menu(),
+        disable_web_page_preview=True
+    )
+    state_manager.set_state(user.id, "main_menu")
+
+@dp.message(lambda msg: msg.text == "💬 چت هوشمند")
+async def enable_chat_mode(message: types.Message):
+    """فعال‌سازی حالت گفتگوی پیشرفته"""
+    user = message.from_user
+    state_manager.set_state(user.id, "chat_mode")
+    
+    await message.answer(
+        text="💡 <b>حالت گفتگوی هوشمند فعال شد!</b>\n\n"
+             "• می‌توانید سوالات تخصصی بپرسید\n"
+             "• برای بازگشت /cancel ارسال کنید\n"
+             "• حداکثر طول پیام: 4000 کاراکتر",
+        reply_markup=types.ReplyKeyboardRemove(),
+        parse_mode="HTML"
     )
 
-@dp.message(lambda msg: msg.text == "ℹ️ اطلاعات ربات")
-async def show_bot_info(message: types.Message):
-    info_text = (
-        "🤖 **نام ربات:** هوش مصنوعی پیشرفته\n"
-        "🔹 **نسخه:** 2.0\n"
-        "🔹 **موتور هوش مصنوعی:** DeepSeek Chat\n"
-        "🔹 **سازنده:** شما"
-    )
-    await message.answer(info_text, reply_markup=get_inline_keyboard())
-
-@dp.callback_query(lambda c: c.data == "help")
-async def process_callback_help(callback_query: types.CallbackQuery):
-    await callback_query.answer("راهنمای استفاده")
-    await bot.send_message(
-        callback_query.from_user.id,
-        "📚 **راهنمای استفاده:**\n"
-        "1. دکمه «💬 چت با هوش مصنوعی» را انتخاب کنید.\n"
-        "2. پیام خود را ارسال کنید.\n"
-        "3. منتظر پاسخ باشید."
-    )
-
+# 9. مدیریت مرکزی پیام‌ها
 @dp.message()
 async def handle_all_messages(message: types.Message):
+    """سیستم یکپارچه پردازش پیام‌ها"""
+    user = message.from_user
+    current_state = state_manager.get_state(user.id)
+    
     try:
-        if not message.text:
-            await message.answer("لطفاً فقط متن ارسال کنید.")
+        # 1. اعتبارسنجی اولیه
+        if not message.text or len(message.text) > 4000:
+            await message.answer("⚠️ پیام باید بین 1 تا 4000 کاراکتر باشد")
             return
 
-        await bot.send_chat_action(message.chat.id, "typing")
-        ai_response = await get_ai_response(message.text)
-        await message.answer(ai_response)
+        # 2. نمایش وضعیت تایپ
+        await bot.send_chat_action(user.id, 'typing')
+
+        # 3. پردازش بر اساس حالت کاربر
+        if current_state == "chat_mode":
+            ai_service = AIService()
+            result = await ai_service.generate_response(message.text)
+            
+            if 'error' in result:
+                await message.answer(result['error'])
+            else:
+                response = result['choices'][0]['message']['content']
+                await message.answer(response[:4000])  # محدودیت طول پاسخ
+
+        else:
+            await message.answer("لطفاً از منوی اصلی انتخاب کنید:", reply_markup=build_main_menu())
 
     except Exception as e:
-        logger.error(f"Error in message handling: {str(e)}")
-        await message.answer("⚠️ خطایی در پردازش درخواست شما رخ داد.")
+        logger.exception(f"Error processing message from {user.id}")
+        await message.answer("⚠️ خطای سیستمی رخ داد. لطفاً بعداً تلاش کنید.")
 
-# ========== اجرای ربات ========== #
+# 10. سیستم مانیتورینگ و راه‌اندازی
+async def startup():
+    """عملیات آغازین پیش از راه‌اندازی"""
+    logger.info("Initializing AI Telegram Bot...")
+    await bot.delete_webhook(drop_pending_updates=True)
+    logger.info("Bot initialized successfully")
+
+async def shutdown():
+    """عملیات پایانی قبل از خاموشی"""
+    logger.info("Shutting down bot...")
+    await bot.session.close()
+    logger.info("Bot shutdown completed")
+
 async def main():
+    """نقطه ورود اصلی برنامه"""
     try:
-        logger.info("Starting bot...")
+        await startup()
         await dp.start_polling(bot)
     except Exception as e:
-        logger.error(f"Bot crashed: {str(e)}")
+        logger.critical(f"Fatal error: {str(e)}", exc_info=True)
+    finally:
+        await shutdown()
 
 if __name__ == '__main__':
     asyncio.run(main())
