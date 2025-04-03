@@ -4,7 +4,7 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # Step 1: Put your bot token here
-TOKEN = 'YOUR_BOT_TOKEN_HERE'  # Replace with your actual bot token
+TOKEN = '7940617171:AAFf36mEF_-_GFgXGN4YE3kQN06-n8LYux0'  # Replace with your actual bot token
 
 # Step 2: Scrape stock price from Yahoo Finance
 def scrape_stock_price(symbol: str):
